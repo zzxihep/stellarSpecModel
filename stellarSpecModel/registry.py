@@ -2,7 +2,7 @@
 stellarSpecModel - Model Registry
 ---------------------------------
 This module acts as the Single Source of Truth for model metadata and local cache state.
-It manages official remote models, downloaded local models, derived subsets, and aliases.
+It manages official remote models, downloaded local models, derived subsets, and purely logical aliases.
 """
 
 import json
@@ -28,7 +28,7 @@ MODEL_SCHEMA = {
             "official",  # 官方发布的原始网格 (通常是从远端下载的)
             "local",     # 本地扫描到的外部基础网格
             "derived",   # 用户裁剪/重采样派生的临时或永久网格
-            "alias",     # 软链接别名
+            "alias",     # 纯逻辑别名 (无物理文件)
         ]
     },
     "status": {
@@ -44,8 +44,7 @@ MODEL_SCHEMA = {
         "type": str,
     },
     "path": {
-        "type": str, # the directory path of the model file, if no path is provided, 
-        # it will be the default path of the base, derived, or alias model
+        "type": str, # 物理文件所在目录，若无则使用全局配置默认路径
     },
     "parent": {
         "type": str,     # 派生模型的父模型 ID (仅 derived 具有)
@@ -165,47 +164,45 @@ class ModelRegistry:
         return copy.deepcopy(self.data[model_id])
 
     def get_absolute_path(self, model_id: str) -> Optional[Path]:
-        """工具函数：通过 registry 记录的 filename 生成完整目录"""
+        """
+        通过 registry 获取模型的物理完整路径。
+        对于 alias 类型，将自动穿透查询并返回目标物理文件的路径。
+        """
         record = self.get(model_id)
+        
+        # 别名逻辑：递归查询真实的目标文件路径
+        if record['kind'] == 'alias':
+            target_id = record.get('target')
+            if target_id and self.exists(target_id):
+                return self.get_absolute_path(target_id)
+            return None
+
+        # 实体物理网格逻辑
         if "filename" in record:
             if 'path' in record:
                 path = Path(record['path'])
             elif record['kind'] == 'derived':
                 path = Path(config.cache_PATH)
-            elif record['kind'] == 'alias':
-                path = Path(config.alias_PATH)
             else:
                 path = Path(config.grid_PATH)
-            return (path/record['filename']).expanduser().resolve()
+            return (path / record['filename']).expanduser().resolve()
         return None
 
     def parse_h5(self, h5name, store_dir: bool = False):
+        """解析外部 HDF5 实体物理文件"""
         import h5py
         model = {}
-        h5name = Path(h5name)
-        flag_alias = h5name.is_symlink()
-        wh5name = Path(h5name).expanduser().resolve()
-        pure_fname = wh5name.name
-        with h5py.File(h5name) as f:
-            if not flag_alias:
-                model['id'] = f.attrs.get('id')
-                model['kind'] = f.attrs.get('kind')
-                model['status'] = 'available'
-                model['filename'] = pure_fname
-                if model['kind'] == 'derived':
-                    model['parent'] = f.attrs.get('parent')
-                if store_dir is True:
-                    model['path'] = wh5name.parent.as_posix()
-            else:
-                model['id'] = h5name.stem
-                model['kind'] = 'alias'
-                model['status'] = 'available'
-                model['filename'] = h5name.name
-                if store_dir is True:
-                    model['path'] = h5name.parent.as_posix()
-                model['target'] = f.attrs.get('id')
-
-            return model
+        h5name = Path(h5name).expanduser().resolve()
+        with h5py.File(h5name, 'r') as f:
+            model['id'] = f.attrs.get('id')
+            model['kind'] = f.attrs.get('kind', 'local')
+            model['status'] = 'available'
+            model['filename'] = h5name.name     
+            if model['kind'] == 'derived':
+                model['parent'] = f.attrs.get('parent')
+            if store_dir is True:
+                model['path'] = h5name.parent.as_posix()
+        return model
 
     def add(self, model: dict, autosave=False):
         """添加新模型。若 ID 已存在则抛出异常。"""
@@ -253,7 +250,8 @@ class ModelRegistry:
         if not self.exists(model_id):
             return            
         record = self.data[model_id]
-        if delete_file and "filename" in record:
+        # 只有实体文件 (非 alias) 才进行物理删除操作
+        if delete_file and record['kind'] != 'alias' and "filename" in record:
             file_path = self.get_absolute_path(model_id)
             if file_path is not None and file_path.exists():
                 try:
@@ -273,20 +271,29 @@ class ModelRegistry:
         return len(to_remove)
 
     def clean_missing(self):
+        """清理所有记录存在但物理文件（或别名对应目标）彻底丢失的记录"""
         to_remove = []
         for mid, record in self.data.items():
-            absfname = self.get_absolute_path(mid)
-            if absfname is None:
-                continue
             if record['status'] == 'remote':
                 continue
-            if not absfname.is_file():
+            if record['kind'] == 'alias':
+                # 如果别名的 target 已经不存在了，顺带删除此别名
+                target_id = record.get('target')
+                if not target_id or not self.exists(target_id):
+                    to_remove.append(mid)
+                    self.remove(mid)
+                continue
+            absfname = self.get_absolute_path(mid)
+            if absfname is None or not absfname.is_file():
                 to_remove.append(mid)
                 self.remove(mid)
         return to_remove
 
     def refresh_status(self):
+        """全局同步刷新每个模型的实际存在状态"""
         for mid, record in self.data.items():
+            if record['kind'] == 'alias':
+                continue
             absfname = self.get_absolute_path(mid)
             if absfname is None or not absfname.is_file():
                 if record['kind'] == 'official':
@@ -321,6 +328,7 @@ class ModelRegistry:
     def scan(self, scan_dir, store_dir: bool = True):
         scan_dir = Path(scan_dir).expanduser().resolve()
         for h5_file in scan_dir.rglob("*.h5"):
+            # 扫描只针对物理实体模型
             model = self.parse_h5(h5_file, store_dir=store_dir)
             model_id = model['id']
             if not self.exists(model_id):
@@ -335,9 +343,9 @@ class ModelRegistry:
         for scan_dir in [
             config.cache_PATH,
             config.grid_PATH,
-            config.alias_PATH
         ]:
-            self.scan(scan_dir, store_dir=False)
+            if Path(scan_dir).expanduser().resolve().exists():
+                self.scan(scan_dir, store_dir=False)
 
     def add_remote(self, model_id: str, url: str, metadata: dict = None):
         self.add({
@@ -349,7 +357,6 @@ class ModelRegistry:
         })
 
     def add_derived(self, model_id: str, parent_id: str, filename: str, parameters: dict = None, temporary: bool = False):
-        """保存 derive 模型的相对路径（filename）"""
         self.add({
             "id": model_id,
             "kind": "derived",
@@ -360,13 +367,15 @@ class ModelRegistry:
             "temporary": temporary
         })
 
-    def add_alias(self, alias_id: str, target_id: str, filename: str):
+    def add_alias(self, alias_id: str, target_id: str):
+        """
+        纯逻辑注册 alias 别名。不涉及任何文件系统操作。
+        只需要提供名字和它指向的真实 target 即可。
+        """
         self.add({
             "id": alias_id,
             "kind": "alias",
-            "status": "available",
-            "target": target_id,
-            "filename": filename
+            "target": target_id
         })
 
 
