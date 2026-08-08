@@ -1,13 +1,17 @@
 import os
 import time
+from pathlib import Path
 from hashlib import md5
 
 
 home_dir = os.path.expanduser('~')
+PACKAGE_DIR = Path(__file__).resolve().parent
 
 cache_PATH = os.getenv('stellarSpecModel_cache_PATH', f'{home_dir}/.stellarSpecModel/cache/')
 grid_PATH = os.getenv('stellarSpecModel_grid_PATH', f'{home_dir}/.stellarSpecModel/grid_data/')
-alias_PATH = os.getenv('stellarSpecModel_alias_PATH', f'{home_dir}/.stellarSpecModel/aliases/')
+
+default_registry_file = PACKAGE_DIR / "default_registry.json"
+user_registry_file = f'{home_dir}/.stellarSpecModel/user_registry.json'
 
 grid_data_dir = os.getenv('stellarSpecModel_grid_PATH', f'{home_dir}/.stellarSpecModel/grid_data/')
 
