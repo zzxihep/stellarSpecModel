@@ -139,20 +139,6 @@ class SpecModel:
         fingerprint_str = json.dumps(fingerprint, sort_keys=True)
         return hashlib.md5(fingerprint_str.encode('utf-8')).hexdigest()
 
-    def _create_symlink(self, target_path, symlink_path, overwrite):
-        """Create a symlink in the operating system as an alias for the preset grid."""
-        try:
-            if os.path.exists(symlink_path) or os.path.islink(symlink_path):
-                if overwrite:
-                    os.remove(symlink_path)
-                else:
-                    return
-            os.symlink(os.path.abspath(target_path), symlink_path)
-            logger.info(f"Symlink created: {os.path.basename(symlink_path)} "
-                        f"-> {os.path.basename(target_path)}")
-        except OSError as e:
-            logger.warning("Failed to create symlink: %s", e)
-
     def _valid_wavelength(self, wavelength: dict | None = None):
         if wavelength is None:
             wave_range = (np.min(self.grid.wave), np.max(self.grid.wave))
@@ -405,24 +391,34 @@ class SpecModel:
         
         active_cache_dir.mkdir(parents=True, exist_ok=True)
         cache_hash = self._generate_cache_key(select, wavelength)
-        model_name = self.grid.metadata['model_name']
-        cache_filename = f"{model_name}_derived_{cache_hash}.h5"
+        parent_id = self.grid.metadata.get('id')
+        derived_model_id = f"{parent_id}_derived_{cache_hash}"
+        cache_filename = f"{derived_model_id}.h5"
         cache_filepath = active_cache_dir / cache_filename
 
         if alias:
-            alias_PATH = Path(config.alias_PATH).expanduser()
-            alias_PATH.mkdir(parents=True, exist_ok=True)
-            alias_filepath = alias_PATH / f'{alias}.h5'
-            if alias_filepath.exists() and not overwrite:
+            if modelRegistry.exists(alias) and not overwrite:
                 raise AliasAlreadyExistsError(
-                    f"Alias '{alias}' already exists. Pass overwrite=True to overwrite."
+                    f"Alias '{alias}' already exists in registry. Pass overwrite=True to overwrite."
                 )
 
         if cache_filepath.exists() and not overwrite:
             logger.info(f"Cache hit! Loading derived grid from {cache_filepath}")
             derived_model = self.__class__.load(cache_filepath)
+            if not modelRegistry.exists(derived_model_id):
+                modelRegistry.add_derived(
+                    model_id=derived_model_id, 
+                    parent_id=parent_id, 
+                    filename=cache_filename,
+                    # parameters={"select": select, "wavelength": wavelength}
+                )
+                modelRegistry.save()
             if alias:
-                self._create_symlink(cache_filepath, alias_filepath, overwrite=overwrite)
+                if modelRegistry.exists(alias):
+                    modelRegistry.update(alias, {"target": derived_model_id})
+                else:
+                    modelRegistry.add_alias(alias, derived_model_id)
+                modelRegistry.save()
             return derived_model
 
         # check the select par
@@ -513,7 +509,9 @@ class SpecModel:
             nflux_tensor = cropped_flux
 
         new_metadata = self.grid.metadata.copy()
+        new_metadata['id'] = derived_model_id
         new_metadata['is_derived'] = True
+        new_metadata['parent'] = parent_id
         new_metadata['wave_sampling'] = method
         
         # 实例化新的底层网格
@@ -532,8 +530,24 @@ class SpecModel:
         logger.info(f"Caching derived grid to {cache_filepath}")
         new_model.grid.to_hdf5(cache_filepath)
 
+        if not modelRegistry.exists(derived_model_id):
+            modelRegistry.add_derived(
+                model_id=derived_model_id, 
+                parent_id=parent_id, 
+                filename=cache_filename,
+                # parameters={"select": select, "wavelength": wavelength}
+            )
+        else:
+            # 应对 overwrite=True 强行覆盖的情况，确保状态为 available
+            modelRegistry.update(derived_model_id, {"status": "available"})
+
         if alias:
-            self._create_symlink(cache_filepath, alias_filepath, overwrite)
+            if modelRegistry.exists(alias):
+                modelRegistry.update(alias, {"target": derived_model_id})
+            else:
+                modelRegistry.add_alias(alias, derived_model_id)
+
+        modelRegistry.save()
 
         return new_model
 
