@@ -9,8 +9,12 @@ from spectool import pyrebin
 from .SpecGrid import SpecGrid
 from .excepts import AliasAlreadyExistsError
 from . import config
+from . import registry
 import logging
 logger = logging.getLogger(__name__)
+
+
+modelRegistry = registry.get_registry()
 
 
 class SpecModel:
@@ -21,7 +25,79 @@ class SpecModel:
         self.grid = grid
 
     @classmethod
-    def load(cls, filepath):
+    def list_models(cls, kind: str = None) -> list:
+        """
+        列出注册表中的模型。
+        
+        :param kind: 筛选特定类型的模型，支持 'official', 'local', 'derived', 'alias'。
+                     如果不传，则列出全部模型。
+        :return: 包含模型信息的字典列表。
+        """
+        # 每次列出前，刷新一下底层物理文件的真实存在状态
+        modelRegistry.refresh_status()
+        
+        if kind:
+            valid_kinds = ["official", "local", "derived", "alias"]
+            if kind not in valid_kinds:
+                raise ValueError(f"Invalid kind '{kind}'. Must be one of {valid_kinds}")
+            models = [m for m in modelRegistry.list_all_models() if m.get("kind") == kind]
+        else:
+            models = modelRegistry.list_all_models()
+
+        # 为了方便用户在终端/Notebook查看，直接打印一张漂亮的简表
+        if not models:
+            print(f"No models found in registry for kind: {kind or 'all'}")
+            return models
+
+        print(f"{'Model ID':<30} | {'Kind':<10} | {'Status':<10} | {'Target/Parent':<20}")
+        print("-" * 78)
+        for m in models:
+            m_id = m.get("id", "")
+            m_kind = m.get("kind", "")
+            m_status = m.get("status", "")
+            # 对于 alias 展示 target，对于 derived 展示 parent
+            m_extra = m.get("target", m.get("parent", "")) 
+            print(f"{m_id:<30} | {m_kind:<10} | {m_status:<10} | {m_extra:<20}")
+            
+        return models
+
+    @classmethod
+    def get(cls, model_id: str, lazy: bool = True):
+        """
+        通过注册表中的 Model ID 加载模型。
+        会自动穿透 alias 别名，寻找真实的物理文件。
+        """
+        # 1. 检查注册表中是否存在该 ID
+        if not modelRegistry.exists(model_id):
+            raise KeyError(
+                f"Model '{model_id}' not found in registry. "
+                "Use SpecModel.list_models() to see available models."
+            )
+            
+        # 2. 检查状态
+        record = modelRegistry.get(model_id)
+        if record.get("status") == "remote":
+            raise RuntimeError(
+                f"Model '{model_id}' is marked as 'remote'. "
+                "You need to download it first before loading."
+            )
+        elif record.get("status") == "missing":
+            raise FileNotFoundError(
+                f"The physical file for model '{model_id}' is missing from the disk."
+            )
+            
+        # 3. 通过 Registry 获取绝对物理路径 (底层会自动处理 alias 的递归透传)
+        absolute_path = modelRegistry.get_absolute_path(model_id)
+        
+        if absolute_path is None or not absolute_path.exists():
+            raise FileNotFoundError(f"Resolved path for model '{model_id}' does not exist: {absolute_path}")
+            
+        # 4. 调用已有的 load 方法加载物理文件
+        logger.info(f"Loading model '{model_id}' from {absolute_path}")
+        return cls.load(absolute_path, lazy=lazy)
+
+    @classmethod
+    def load(cls, filepath, lazy=True):
         """
         class method: direct loading from HDF5 file
         """
@@ -29,7 +105,7 @@ class SpecModel:
             raise FileNotFoundError(f"Derived grid file not found at {filepath}")
         
         # 依赖 SpecGrid 自身的 HDF5 读取能力
-        loaded_grid = SpecGrid.from_hdf5(filepath)
+        loaded_grid = SpecGrid.from_hdf5(filepath, lazy=lazy)
         return cls(loaded_grid)
 
     def _generate_cache_key(self, select: dict, wavelength: dict) -> str:
