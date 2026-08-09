@@ -1,0 +1,41 @@
+{
+    "models": [
+        {
+            "id": "marcs-v1",
+            "kind": "official",
+            "status": "available",
+            "filename": "marcs_base_grid.h5",
+            "download": {
+                "url": "https://example-data-server.org/models/marcs_2014_v1_base.h5",
+                "checksum": "md5:8f4c2b9a1d...",
+                "size_mb": 1250
+            },
+            "metadata": {
+                "model_name": "MARCS",
+                "reference": "Gustafsson et al. 2008, A&A, 486, 951",
+                "description": "Standard MARCS model atmospheres grid (2014 version)"
+            }
+        },
+        {
+            "id": "marcs_local_v1",
+            "kind": "local",
+            "status": "available",
+            "filename": "marcsTurb_base_grid.h5",
+            "metadata": {
+                "model_name": "MARCS",
+                "reference": "Gustafsson et al. 2008, A&A, 486, 951",
+                "description": "Standard MARCS model atmospheres grid (2014 version)"
+            }
+        },
+        {
+            "id": "MARCS",
+            "kind": "alias",
+            "target": "marcs-v1"
+        },
+        {
+            "id": "MARCS_local",
+            "kind": "alias",
+            "target": "marcs_local_v1"
+        }
+    ]
+}
